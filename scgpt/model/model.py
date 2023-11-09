@@ -52,6 +52,7 @@ class TransformerModel(nn.Module):
         pre_norm: bool = False,
     ):
         super().__init__()
+        print("hey")
         self.model_type = "Transformer"
         self.d_model = d_model
         self.do_dab = do_dab
@@ -309,6 +310,7 @@ class TransformerModel(nn.Module):
         CCE: bool = False,
         MVC: bool = False,
         ECS: bool = False,
+        GEB: bool = False,
         do_sample: bool = False,
     ) -> Mapping[str, Tensor]:
         """
@@ -326,6 +328,7 @@ class TransformerModel(nn.Module):
                 embedding MVC output
             ECS (:obj:`bool`): if True, return the elastic cell similarity objective
                 (ECS) output.
+            GEB (:obj:`bool`): if True, return the gene embedding output
 
         Returns:
             dict of output Tensors.
@@ -424,6 +427,11 @@ class TransformerModel(nn.Module):
 
         if self.do_dab:
             output["dab_output"] = self.grad_reverse_discriminator(cell_emb)
+
+        if GEB:
+            output["gene_embedding"] = transformer_output[
+                :, :, :
+            ]  # (batch, seq_len, embsize)
 
         return output
 

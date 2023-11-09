@@ -3,9 +3,37 @@ import seaborn as sns
 import itertools
 import networkx as nx
 
+
+### @title Explainable Attention ####
+
+def get_attention(model, input_ids, input_tokens, output_attentions=True, save_path=""):
+    ### run the model with the data
+    if len(save_path)>0:
+    # save as pkl
+    with open(save_path+"_attn_scores.pkl", "wb") as f:
+        pickle.dump(attn_scores, f)
+    ## TODO: show highly attended genes:
+    
+    return attn_scores
+
+def viz_attention(attention, joint_attention=True, layer=-1, loc=[], key_genes=[], gene_names=[], random=False):
+    if len(loc) >0:
+        todisp = [torch.FloatTensor([attention[:,loc[0]:loc[1],loc[0]:loc[1]]])]
+        names = gene_names[loc[0]:loc[1]]
+    elif len(key_genes) >0:
+        
+        names = key_genes
+    elif random:
+        random_indices = np.random.randint(low=0, high=attention.shape[1], size=80)
+        todisp = [attention[:, random_indices, :][:,:,random_indices]]
+        names = np.array(gene_names)[random_indices]
+    else:
+        raise ValueError("Please provide either a location or a list of genes to visualize")
+
+    head_view(todisp, names)
+    
+
 # @title Utilities
-
-
 def get_adjmat(mat, input_tokens):
     n_layers, length, _ = mat.shape
     adj_mat = np.zeros(((n_layers + 1) * length, (n_layers + 1) * length))
@@ -173,18 +201,15 @@ def compute_node_flow(G, labels_to_index, input_nodes, output_nodes, length):
 
 def compute_joint_attention(att_mat, add_residual=True):
     if add_residual:
-        residual_att = np.eye(att_mat.shape[1])[None, ...]
-        aug_att_mat = att_mat + residual_att
-        aug_att_mat = aug_att_mat / aug_att_mat.sum(axis=-1)[..., None]
-    else:
-        aug_att_mat = att_mat
+        att_mat = att_mat + np.eye(att_mat.shape[1])[None, ...]
+        att_mat = att_mat / att_mat.sum(axis=-1)[..., None]
 
-    joint_attentions = np.zeros(aug_att_mat.shape)
+    joint_attentions = np.zeros(att_mat.shape)
 
     layers = joint_attentions.shape[0]
-    joint_attentions[0] = aug_att_mat[0]
+    joint_attentions[0] = att_mat[0]
     for i in np.arange(1, layers):
-        joint_attentions[i] = aug_att_mat[i].dot(joint_attentions[i - 1])
+        joint_attentions[i] = att_mat[i].dot(joint_attentions[i - 1])
 
     return joint_attentions
 
@@ -209,3 +234,21 @@ def convert_adjmat_tomats(adjmat, n_layers, l):
         mats[i] = adjmat[(i + 1) * l : (i + 2) * l, i * l : (i + 1) * l]
 
     return mats
+
+
+##### gene clusters #####
+def viz_gene_embeddings() -> ad.AnnData:
+    di = pd.read_pickle("../geneformer/token_dictionary.pkl")
+    val = di.keys()
+    adata = sc.AnnData(pd.DataFrame(index=list(val), data=model.embeddings.word_embeddings.weight.data.cpu()))
+
+    sc.pp.pca(adata, n_comps=50)
+    sc.pp.neighbors(adata, n_pcs=50, n_neighbors=20)
+    sc.tl.umap(adata, min_dist=0.3)
+
+    sc.tl.leiden(adata, resolution=0.5, key_added="leiden_res0.5")
+    sc.tl.leiden(adata, resolution=1, key_added="leiden_res1")
+    sc.tl.leiden(adata, resolution=4, key_added="leiden_res4")
+
+    sc.pl.umap(adata, color=["leiden_res4"])
+    return adata
