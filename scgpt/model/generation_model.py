@@ -131,8 +131,7 @@ class TransformerGenerator(nn.Module):
         input_pert_flags,
         src_key_padding_mask: Tensor,
     ) -> Tensor:
-        src = self.encoder(src)  # (batch, seq_len, embsize)
-        self.cur_gene_token_embs = src
+        self.cur_gene_token_embs = self.encoder(src)  # (batch, seq_len, embsize)
         values = self.value_encoder(values)  # (batch, seq_len, embsize)
         perts = self.pert_encoder(input_pert_flags)  # (batch, seq_len, embsize)
         total_embs = src + values + perts

@@ -461,6 +461,7 @@ def random_mask_value(
     Returns:
         torch.Tensor: A tensor of masked data.
     """
+    print("hey")
     if isinstance(values, torch.Tensor):
         # it is crutial to clone the tensor, otherwise it changes the original tensor
         values = values.clone().detach().numpy()
