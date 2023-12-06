@@ -23,32 +23,23 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 
 
 def prepare_data(
-    tokenized_train,
-    tokenized_valid,
+    masked_values_train,
+    masked_values_valid,
     train_batch_labels,
     valid_batch_labels,
-    config,
+    task,
+    mask_ratio,
+    mask_value,
+    pad_value,
     epoch,
     train_celltype_labels=None,
     valid_celltype_labels=None,
     sort_seq_batch=False,
 ) -> Tuple[Dict[str, torch.Tensor]]:
-    assert config.task in ["annotation", "integration", "perturb", "multiomic"]
-    masked_values_train = random_mask_value(
-        tokenized_train["values"],
-        mask_ratio=config.mask_ratio,
-        mask_value=config.mask_value,
-        pad_value=config.pad_value,
-    )
-    masked_values_valid = random_mask_value(
-        tokenized_valid["values"],
-        mask_ratio=config.mask_ratio,
-        mask_value=config.mask_value,
-        pad_value=config.pad_value,
-    )
+    assert task in ["annotation", "integration", "perturb", "multiomic"]
     print(
         f"random masking at epoch {epoch:3d}, ratio of masked values in train: ",
-        f"{(masked_values_train == config.mask_value).sum() / (masked_values_train - config.pad_value).count_nonzero():.4f}",
+        f"{(masked_values_train == mask_value).sum() / (masked_values_train - pad_value).count_nonzero():.4f}",
     )
 
     input_gene_ids_train, input_gene_ids_valid = (
@@ -65,11 +56,11 @@ def prepare_data(
     tensor_batch_labels_train = torch.from_numpy(train_batch_labels).long()
     tensor_batch_labels_valid = torch.from_numpy(valid_batch_labels).long()
 
-    if config.task == "annotation":
+    if task == "annotation":
         tensor_celltype_labels_train = torch.from_numpy(train_celltype_labels).long()
         tensor_celltype_labels_valid = torch.from_numpy(valid_celltype_labels).long()
 
-    if config.task == "multiomic":
+    if task == "multiomic":
         tensor_mod_types_train, tensor_mod_types_valid = (
             tokenized_train["mod_types"].long(),
             tokenized_valid["mod_types"].long(),
@@ -81,18 +72,18 @@ def prepare_data(
         input_values_train = input_values_train[train_sort_ids]
         target_values_train = target_values_train[train_sort_ids]
         tensor_batch_labels_train = tensor_batch_labels_train[train_sort_ids]
-        if config.task == "annotation":
+        if task == "annotation":
             tensor_celltype_labels_train = tensor_celltype_labels_train[train_sort_ids]
-        if config.task == "multiomic":
+        if task == "multiomic":
             tensor_mod_types_train = tensor_mod_types_train[train_sort_ids]
         valid_sort_ids = np.argsort(valid_batch_labels)
         input_gene_ids_valid = input_gene_ids_valid[valid_sort_ids]
         input_values_valid = input_values_valid[valid_sort_ids]
         target_values_valid = target_values_valid[valid_sort_ids]
         tensor_batch_labels_valid = tensor_batch_labels_valid[valid_sort_ids]
-        if config.task == "annotation":
+        if task == "annotation":
             tensor_celltype_labels_valid = tensor_celltype_labels_valid[valid_sort_ids]
-        if config.task == "multiomic":
+        if task == "multiomic":
             tensor_mod_types_valid = tensor_mod_types_valid[valid_sort_ids]
 
     train_data_pt = {
@@ -107,10 +98,10 @@ def prepare_data(
         "target_values": target_values_valid,
         "batch_labels": tensor_batch_labels_valid,
     }
-    if config.task == "annotation":
+    if task == "annotation":
         train_data_pt["celltype_labels"] = tensor_celltype_labels_train
         valid_data_pt["celltype_labels"] = tensor_celltype_labels_valid
-    if config.task == "multiomic":
+    if task == "multiomic":
         train_data_pt["mod_types"] = tensor_mod_types_train
         valid_data_pt["mod_types"] = tensor_mod_types_valid
     return train_data_pt, valid_data_pt
@@ -384,6 +375,7 @@ def evaluate(
     device,
     config,
     epoch,
+    logger,
 ) -> float:
     """
     Evaluate the model on the evaluation data.
@@ -446,7 +438,7 @@ def evaluate(
 
             total_num += len(input_gene_ids)
 
-    wandb.log(
+    logger.log(
         {
             "valid/loss": (total_loss + config.dab_weight * total_dab) / total_num,
             "epoch": epoch,
@@ -473,9 +465,7 @@ def predict(
         for batch_data in loader:
             input_gene_ids = batch_data["gene_ids"].to(device)
             input_values = batch_data["values"].to(device)
-            target_values = batch_data["target_values"].to(device)
             batch_labels = batch_data["batch_labels"].to(device)
-            celltype_labels = batch_data["celltype_labels"].to(device)
 
             src_key_padding_mask = input_gene_ids.eq(vocab[config.pad_token])
 
