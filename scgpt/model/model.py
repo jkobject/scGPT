@@ -55,7 +55,6 @@ class TransformerModel(nn.Module):
         pre_norm: bool = False,
     ):
         super().__init__()
-        print("hey")
         self.model_type = "Transformer"
         self.d_model = d_model
         self.do_dab = do_dab

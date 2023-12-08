@@ -9,7 +9,10 @@ import numpy as np
 from anndata import AnnData
 import scanpy as sc
 from typing import List, Tuple, Dict, Optional
-from scgpt.tokenizer import tokenize_and_pad_batch, random_mask_value
+from scgpt.tokenizer import (
+    tokenize_and_pad_batch,
+    random_mask_value,
+)
 from scgpt import SubsetsBatchSampler
 from scgpt.loss import (
     masked_relative_error,
@@ -23,8 +26,8 @@ from sklearn.metrics import accuracy_score, precision_score, recall_score, f1_sc
 
 
 def prepare_data(
-    masked_values_train,
-    masked_values_valid,
+    tokenized_train,
+    tokenized_valid,
     train_batch_labels,
     valid_batch_labels,
     task,
@@ -37,6 +40,18 @@ def prepare_data(
     sort_seq_batch=False,
 ) -> Tuple[Dict[str, torch.Tensor]]:
     assert task in ["annotation", "integration", "perturb", "multiomic"]
+    masked_values_train = random_mask_value(
+        tokenized_train["values"],
+        mask_ratio=mask_ratio,
+        mask_value=mask_value,
+        pad_value=pad_value,
+    )
+    masked_values_valid = random_mask_value(
+        tokenized_valid["values"],
+        mask_ratio=mask_ratio,
+        mask_value=mask_value,
+        pad_value=pad_value,
+    )
     print(
         f"random masking at epoch {epoch:3d}, ratio of masked values in train: ",
         f"{(masked_values_train == mask_value).sum() / (masked_values_train - pad_value).count_nonzero():.4f}",
@@ -192,7 +207,7 @@ def train(
     )
     total_zero_log_prob, total_gepc_zero_log_prob = 0.0, 0.0
     # total_error = 0.0
-    log_interval = config.log_interval
+    log_interval = config["log_interval"]
     start_time = time.time()
 
     num_batches = len(loader)
@@ -201,55 +216,55 @@ def train(
         input_values = batch_data["values"].to(device)
         target_values = batch_data["target_values"].to(device)
         batch_labels = batch_data["batch_labels"].to(device)
-        if config.task == "annotation":
+        if config["task"] == "annotation":
             celltype_labels = batch_data["celltype_labels"].to(device)
-        if config.task == "multiomic":
+        if config["task"] == "multiomic":
             mod_types = batch_data["mod_types"].to(device)
 
-        src_key_padding_mask = input_gene_ids.eq(vocab[config.pad_token])
+        src_key_padding_mask = input_gene_ids.eq(vocab[config["pad_token"]])
 
-        with torch.cuda.amp.autocast(enabled=config.amp):
+        with torch.cuda.amp.autocast(enabled=config["amp"]):
             output_dict = model(
                 input_gene_ids,
                 input_values,
                 src_key_padding_mask=src_key_padding_mask,
                 batch_labels=batch_labels
-                if config.use_batch_labels or config.DSBN
+                if config["use_batch_labels"] or config["DSBN"]
                 else None,
-                CLS=config.CLS,
-                MVC=config.GEPC,
-                ECS=config.ESC,
-                mod_types=mod_types if config.use_mod else None,
+                CLS=config["CLS"],
+                MVC=config["GEPC"],
+                ECS=config["ECS"],
+                # mod_types=mod_types if config["use_mod"] else None,
                 # do_sample=do_sample_in_train,
                 # generative_training=False
             )
 
             masked_positions = input_values.eq(
-                config.mask_value
+                config["mask_value"]
             )  # the postions to predict
             loss = 0.0
             metrics_to_log = {}
-            if config.GEP:
+            if config["GEP"]:
                 loss_gep = criterion_gep_gepc(
                     output_dict["mlm_output"], target_values, masked_positions
                 )
                 loss = loss + loss_gep
                 metrics_to_log = {"train/gep": loss_gep.item()}
-            if config.GEP and config.explicit_zero_prob:
+            if config["GEP"] and config["explicit_zero_prob"]:
                 loss_zero_log_prob = criterion_neg_log_bernoulli(
                     output_dict["mlm_zero_probs"], target_values, masked_positions
                 )
                 loss = loss + loss_zero_log_prob
                 metrics_to_log.update({"train/nzlp": loss_zero_log_prob.item()})
 
-            if config.GEPC:
+            if config["GEPC"]:
                 loss_gepc = criterion_gep_gepc(
                     output_dict["mvc_output"], target_values, masked_positions
                 )
                 loss = loss + loss_gepc
                 metrics_to_log.update({"train/mvc": loss_gepc.item()})
 
-            if config.GEPC and config.explicit_zero_prob:
+            if config["GEPC"] and config["explicit_zero_prob"]:
                 loss_gepc_zero_log_prob = criterion_neg_log_bernoulli(
                     output_dict["mvc_zero_probs"], target_values, masked_positions
                 )
@@ -258,7 +273,7 @@ def train(
                     {"train/mvc_nzlp": loss_gepc_zero_log_prob.item()}
                 )
 
-            if config.CLS:
+            if config["CLS"]:
                 loss_cls = criterion_cls(output_dict["cls_output"], celltype_labels)
                 loss = loss + loss_cls
                 metrics_to_log.update({"train/cls": loss_cls.item()})
@@ -269,15 +284,15 @@ def train(
                     .item()
                 ) / celltype_labels.size(0)
 
-            if config.ESC:
+            if config["ECS"]:
                 loss_ecs = 10 * output_dict["loss_ecs"]
                 loss = loss + loss_ecs
                 metrics_to_log.update({"train/ecs": loss_ecs.item()})
 
-            if config.DAR:
+            if config["DAR"]:
                 # try weighting and separate optimizer
                 loss_dab = criterion_dab(output_dict["dab_output"], batch_labels)
-                loss = loss + config.dab_weight * loss_dab
+                loss = loss + config["dab_weight"] * loss_dab
                 metrics_to_log.update({"train/dab": loss_dab.item()})
 
         model.zero_grad()
@@ -303,36 +318,38 @@ def train(
         wandb.log(metrics_to_log)
 
         total_loss += loss.item()
-        total_gep += loss_gep.item() if config.GEP else 0.0
-        total_cls += loss_cls.item() if config.CLS else 0.0
-        total_gepc += loss_gepc.item() if config.GEPC else 0.0
-        total_ecs += loss_ecs.item() if config.ESC else 0.0
-        total_dab += loss_dab.item() if config.DAR else 0.0
+        total_gep += loss_gep.item() if config["GEP"] else 0.0
+        total_cls += loss_cls.item() if config["CLS"] else 0.0
+        total_gepc += loss_gepc.item() if config["GEPC"] else 0.0
+        total_ecs += loss_ecs.item() if config["ECS"] else 0.0
+        total_dab += loss_dab.item() if config["DAR"] else 0.0
         total_zero_log_prob += (
             loss_zero_log_prob.item()
-            if config.GEP and config.explicit_zero_prob
+            if config["GEP"] and config["explicit_zero_prob"]
             else 0.0
         )
         total_gepc_zero_log_prob += (
             loss_gepc_zero_log_prob.item()
-            if config.GEPC and config.explicit_zero_prob
+            if config["GEPC"] and config["explicit_zero_prob"]
             else 0.0
         )
         if batch % log_interval == 0 and batch > 0:
             lr = scheduler.get_last_lr()[0]
             ms_per_batch = (time.time() - start_time) * 1000 / log_interval
             cur_loss = total_loss / log_interval
-            cur_gep = total_gep / log_interval if config.GEP else 0.0
-            cur_cls = total_cls / log_interval if config.CLS else 0.0
-            cur_gepc = total_gepc / log_interval if config.GEPC else 0.0
-            cur_ecs = total_ecs / log_interval if config.ESC else 0.0
-            cur_dab = total_dab / log_interval if config.DAR else 0.0
+            cur_gep = total_gep / log_interval if config["GEP"] else 0.0
+            cur_cls = total_cls / log_interval if config["CLS"] else 0.0
+            cur_gepc = total_gepc / log_interval if config["GEPC"] else 0.0
+            cur_ecs = total_ecs / log_interval if config["ECS"] else 0.0
+            cur_dab = total_dab / log_interval if config["DAR"] else 0.0
             cur_zero_log_prob = (
-                total_zero_log_prob / log_interval if config.explicit_zero_prob else 0.0
+                total_zero_log_prob / log_interval
+                if config["explicit_zero_prob"]
+                else 0.0
             )
             cur_gepc_zero_log_prob = (
                 total_gepc_zero_log_prob / log_interval
-                if config.GEPC and config.explicit_zero_prob
+                if config["GEPC"] and config["explicit_zero_prob"]
                 else 0.0
             )
             # cur_error = total_error / log_interval
@@ -341,12 +358,12 @@ def train(
                 f"| epoch {epoch:3d} | {batch:3d}/{num_batches:3d} batches | "
                 f"lr {lr:05.5f} | ms/batch {ms_per_batch:5.2f} | "
                 f"loss {cur_loss:5.2f} | "
-                + (f"gep {cur_gep:5.2f} |" if config.GEP else "")
-                + (f"cls {cur_cls:5.2f} | " if config.CLS else "")
-                # + (f"err {cur_error:5.2f} | " if config.CLS else "")
-                + (f"gepc {cur_gepc:5.2f} |" if config.GEPC else "")
-                + (f"ecs {cur_ecs:5.2f} |" if config.ESC else "")
-                + (f"dar {cur_dab:5.2f} |" if config.DAR else "")
+                + (f"gep {cur_gep:5.2f} |" if config["GEP"] else "")
+                + (f"cls {cur_cls:5.2f} | " if config["CLS"] else "")
+                # + (f"err {cur_error:5.2f} | " if config['CLS'] else "")
+                + (f"gepc {cur_gepc:5.2f} |" if config["GEPC"] else "")
+                + (f"ecs {cur_ecs:5.2f} |" if config["ECS"] else "")
+                + (f"dar {cur_dab:5.2f} |" if config["DAR"] else "")
             )
             total_loss = 0
             total_gep = 0
@@ -391,58 +408,59 @@ def evaluate(
             input_values = batch_data["values"].to(device)
             target_values = batch_data["target_values"].to(device)
             batch_labels = batch_data["batch_labels"].to(device)
-            if config.task == "annotation":
+            if config["task"] == "annotation":
                 celltype_labels = batch_data["celltype_labels"].to(device)
-            if config.task == "multiomic":
-                mod_types = batch_data["mod_types"].to(device)
 
-            src_key_padding_mask = input_gene_ids.eq(vocab[config.pad_token])
+            src_key_padding_mask = input_gene_ids.eq(vocab[config["pad_token"]])
 
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            with torch.cuda.amp.autocast(enabled=config["amp"]):
                 output_dict = model(
                     input_gene_ids,
                     input_values,
                     src_key_padding_mask=src_key_padding_mask,
                     batch_labels=batch_labels
-                    if config.use_batch_labels or config.DSBN
+                    if config["use_batch_labels"] or config["DSBN"]
                     else None,
-                    CLS=config.CLS,  # evaluation does not need CLS or CCE
+                    CLS=config["CLS"],  # evaluation does not need CLS or CCE
                     MVC=False,
                     ECS=False,
-                    mod_types=mod_types if config.use_mod else None,
+                    # mod_types=mod_types if config["use_mod"] else None,
                     # do_sample=do_sample_in_train,
                     # generative_training = False,
                 )
-                if config.task == "annotation":
+                if config["task"] == "annotation":
                     output_values = output_dict["cls_output"]
-                    loss = criterion_cls(output_values, celltype_labels)
-
-                elif config.task in ["integration", "multiomic"]:
+                    loss = criterion_cls(output_values, celltype_labels).item()
                     output_values = output_dict["mlm_output"]
-                    masked_positions = input_values.eq(config.mask_value)
+                    masked_positions = input_values.eq(config["mask_value"])
+                    loss += criterion_gep_gepc(
+                        output_values, target_values, masked_positions
+                    )
+
+                elif config["task"] in ["integration", "multiomic"]:
+                    output_values = output_dict["mlm_output"]
+                    masked_positions = input_values.eq(config["mask_value"])
                     loss = criterion_gep_gepc(
                         output_values, target_values, masked_positions
                     )
 
-                if config.DAR:
+                if config["DAR"]:
                     loss_dab = criterion_dab(output_dict["dab_output"], batch_labels)
 
             total_loss += loss.item() * len(input_gene_ids)
 
-            if config.DAR:
+            if config["DAR"]:
                 total_dab += (
-                    loss_dab.item() * len(input_gene_ids) if config.DAR else 0.0
+                    loss_dab.item() * len(input_gene_ids) if config["DAR"] else 0.0
                 )
             else:
                 total_dab = 0
 
             total_num += len(input_gene_ids)
 
-    logger.log(
-        {
-            "valid/loss": (total_loss + config.dab_weight * total_dab) / total_num,
-            "epoch": epoch,
-        },
+    logger.info(
+        f"valid/loss: {(total_loss + config['dab_weight'] * total_dab) / total_num}"
+        f"epoch {epoch}"
     )
 
     return total_loss / total_num
@@ -467,19 +485,19 @@ def predict(
             input_values = batch_data["values"].to(device)
             batch_labels = batch_data["batch_labels"].to(device)
 
-            src_key_padding_mask = input_gene_ids.eq(vocab[config.pad_token])
+            src_key_padding_mask = input_gene_ids.eq(vocab[config["pad_token"]])
 
-            with torch.cuda.amp.autocast(enabled=config.amp):
+            with torch.cuda.amp.autocast(enabled=config["amp"]):
                 output_dict = model(
                     input_gene_ids,
                     input_values,
                     src_key_padding_mask=src_key_padding_mask,
                     batch_labels=batch_labels
-                    if config.use_batch_labels or config.DSBN
+                    if config["use_batch_labels"] or config["DSBN"]
                     else None,
-                    CLS=config.CLS,
-                    MVC=config.GEPC,
-                    ECS=config.ESC,
+                    CLS=config["CLS"],
+                    MVC=config["GEPC"],
+                    ECS=config["ECS"],
                 )
 
                 output_values = output_dict["cls_output"]
@@ -494,9 +512,9 @@ def test(
     model: nn.Module, adata: DataLoader, gene_ids, vocab, config, device, logger
 ) -> float:
     all_counts = (
-        adata.layers[config.input_layer_key].A
-        if issparse(adata.layers[config.input_layer_key])
-        else adata.layers[config.input_layer_key]
+        adata.layers[config["input_layer_key"]].A
+        if issparse(adata.layers[config["input_layer_key"]])
+        else adata.layers[config["input_layer_key"]]
     )
 
     celltypes_labels = adata.obs["celltype_id"].tolist()  # make sure count from 0
@@ -508,19 +526,19 @@ def test(
     tokenized_test = tokenize_and_pad_batch(
         all_counts,
         gene_ids,
-        max_len=config.max_seq_len,
+        max_len=config["max_seq_len"],
         vocab=vocab,
-        pad_token=config.pad_token,
-        pad_value=config.pad_value,
+        pad_token=config["pad_token"],
+        pad_value=config["pad_value"],
         append_cls=True,  # append <cls> token at the beginning
-        include_zero_gene=config.include_zero_gene,
+        include_zero_gene=config["include_zero_gene"],
     )
 
     input_values_test = random_mask_value(
         tokenized_test["values"],
-        mask_ratio=config.mask_ratio,
-        mask_value=config.mask_value,
-        pad_value=config.pad_value,
+        mask_ratio=config["mask_ratio"],
+        mask_value=config["mask_value"],
+        pad_value=config["pad_value"],
     )
 
     test_data_pt = {
@@ -533,10 +551,10 @@ def test(
 
     test_loader = DataLoader(
         dataset=SeqDataset(test_data_pt),
-        batch_size=config.batch_size,
+        batch_size=config["batch_size"],
         shuffle=False,
         drop_last=False,
-        num_workers=min(len(os.sched_getaffinity(0)), config.batch_size // 2),
+        num_workers=min(len(os.sched_getaffinity(0)), config["batch_size"] // 2),
         pin_memory=True,
     )
 
@@ -588,9 +606,9 @@ def eval_testdata(
     adata_t = adata_t.copy()
 
     all_counts = (
-        adata_t.layers[config.input_layer_key].A
-        if issparse(adata_t.layers[config.input_layer_key])
-        else adata_t.layers[config.input_layer_key]
+        adata_t.layers[config["input_layer_key"]].A
+        if issparse(adata_t.layers[config["input_layer_key"]])
+        else adata_t.layers[config["input_layer_key"]]
     )
 
     celltypes_labels = adata_t.obs["celltype"].tolist()
@@ -605,23 +623,23 @@ def eval_testdata(
         tokenized_all = tokenize_and_pad_batch(
             all_counts,
             gene_ids,
-            max_len=config.max_seq_len,
+            max_len=config["max_seq_len"],
             vocab=vocab,
-            pad_token=config.pad_token,
-            pad_value=config.pad_value,
+            pad_token=config["pad_token"],
+            pad_value=config["pad_value"],
             append_cls=True,  # append <cls> token at the beginning
-            include_zero_gene=config.include_zero_gene,
+            include_zero_gene=config["include_zero_gene"],
         )
         all_gene_ids, all_values = tokenized_all["genes"], tokenized_all["values"]
-        src_key_padding_mask = all_gene_ids.eq(vocab[config.pad_token])
-        with torch.no_grad(), torch.cuda.amp.autocast(enabled=config.amp):
+        src_key_padding_mask = all_gene_ids.eq(vocab[config["pad_token"]])
+        with torch.no_grad(), torch.cuda.amp.autocast(enabled=config["amp"]):
             cell_embeddings = model.encode_batch(
                 all_gene_ids,
                 all_values.float(),
                 src_key_padding_mask=src_key_padding_mask,
-                batch_size=config.batch_size,
+                batch_size=config["batch_size"],
                 batch_labels=torch.from_numpy(batch_ids).long()
-                if config.DSBN or config.DAR or config.use_batch_labels
+                if config["DSBN"] or config["DAR"] or config["use_batch_labels"]
                 else None,
                 time_step=0,
                 return_np=True,

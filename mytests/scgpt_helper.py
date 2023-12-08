@@ -1,22 +1,25 @@
-from scgpt.tokenizer import tokenize_and_pad_batch, GeneVocab, random_mask_value
+from scgpt.tokenizer import tokenize_and_pad_batch
 
 from scgpt.trainer import prepare_data, prepare_dataloader
 from scgpt import logger
 from scgpt.trainer import train as scgpt_train
 from scgpt.trainer import evaluate as scgpt_validate
 from scgpt.utils import set_seed, add_file_handler
-
+from scgpt.loss import (
+    masked_mse_loss,
+    masked_relative_error,
+    criterion_neg_log_bernoulli,
+)
 import time
 import wandb
-import scanpy as sc
 from pathlib import Path
 import numpy as np
 from scipy.sparse import issparse
 from sklearn.model_selection import train_test_split
 import copy
-import gc
 import torch
-from typing import Union
+from torch import nn
+import gc
 
 
 def prepare_dataset(
@@ -31,6 +34,7 @@ def prepare_dataset(
     pad_value=-2,
     per_seq_batch_sample=True,
     test_size=0.2,
+    task="annotation",
 ):
     all_counts = (
         dataset.layers["X_binned"]
@@ -46,8 +50,8 @@ def prepare_dataset(
         valid_batch_labels,
     ) = train_test_split(
         all_counts,
-        dataset.obs["cell_type"].values,
-        dataset.obs["batch_id"].values,
+        dataset.obs["cell_type"].astype("category").cat.codes.values,
+        dataset.obs["batch_id"].astype("category").cat.codes.values,
         test_size=test_size,
         shuffle=True,
     )
@@ -79,24 +83,12 @@ def prepare_dataset(
         f"valid set number of samples: {tokenized_valid['genes'].shape[0]}, "
         f"\n\t feature length: {tokenized_valid['genes'].shape[1]}"
     )
-    masked_values_train = random_mask_value(
-        tokenized_train["values"],
-        mask_ratio=mask_ratio,
-        mask_value=mask_value,
-        pad_value=pad_value,
-    )
-    masked_values_valid = random_mask_value(
-        tokenized_valid["values"],
-        mask_ratio=mask_ratio,
-        mask_value=mask_value,
-        pad_value=pad_value,
-    )
     train_data_pt, valid_data_pt = prepare_data(
-        masked_values_train,
-        masked_values_valid,
+        tokenized_train,
+        tokenized_valid,
         train_batch_labels,
         valid_batch_labels,
-        task="annotation",
+        task=task,
         mask_ratio=mask_ratio,
         mask_value=mask_value,
         pad_value=pad_value,
@@ -148,19 +140,82 @@ def load_dataset(dataset, vocab):
     return dataset
 
 
-def fine_tune(model, train_loader, valid_loader, epochs, scheduler, save_folder):
-    best_val_loss = float("inf")
-    best_model = None
+def fine_tune(
+    model,
+    config,
+    dataset,
+    vocab,
+    epochs,
+    batch_size,
+    save_folder,
+    device,
+    task="annotation",
+):
+    optimizer = torch.optim.Adam(
+        model.parameters(),
+        lr=config["lr"],
+        eps=1e-4 if config["amp"] else 1e-8,
+    )
+    scheduler = torch.optim.lr_scheduler.StepLR(
+        optimizer, 1, gamma=config["schedule_ratio"]
+    )
+    config["task"] = "annotation"
+    scaler = torch.cuda.amp.GradScaler(enabled=config["amp"])
 
+    run = wandb.init(
+        config=config,
+        project="scGPT",
+        reinit=True,
+        settings=wandb.Settings(start_method="fork"),
+    )
+    wandb.watch(model)
+
+    best_val_loss = float("inf")
+
+    best_model = None
     for epoch in range(1, epochs + 1):
         epoch_start_time = time.time()
-        scgpt_train()
-        val_loss, val_mre = scgpt_validate()
+        data_loader, valid_loader = prepare_dataset(
+            dataset,
+            vocab,
+            batch_size,
+            epoch=epoch,
+            n_hvg=config["n_hvg"],
+            test_size=0.2,
+            mask_ratio=config["mask_ratio"],
+        )
+        scgpt_train(
+            model,
+            data_loader,
+            vocab,
+            criterion_gep_gepc=masked_mse_loss,
+            criterion_dab=torch.nn.CrossEntropyLoss(),
+            criterion_cls=nn.CrossEntropyLoss(),
+            scaler=scaler,
+            optimizer=optimizer,
+            scheduler=scheduler,
+            device=device,
+            config=config,
+            logger=logger,
+            epoch=epoch,
+        )
+        val_loss = scgpt_validate(
+            model,
+            valid_loader,
+            vocab,
+            criterion_gep_gepc=masked_mse_loss,
+            criterion_dab=torch.nn.CrossEntropyLoss(),
+            criterion_cls=nn.CrossEntropyLoss(),
+            device=device,
+            config=config,
+            logger=logger,
+            epoch=epoch,
+        )
         elapsed = time.time() - epoch_start_time
         logger.info("-" * 89)
         logger.info(
             f"| end of epoch {epoch:3d} | time: {elapsed:5.2f}s | "
-            f"valid loss/mse {val_loss:5.4f} | mre {val_mre:5.4f}"
+            f"valid loss/mse {val_loss:5.4f}"
         )
         logger.info("-" * 89)
 
@@ -170,12 +225,19 @@ def fine_tune(model, train_loader, valid_loader, epochs, scheduler, save_folder)
             best_model_epoch = epoch
             logger.info(f"Best model with score {best_val_loss:5.4f}")
         scheduler.step()
-    # TODO:
     logger.info(f"Saving model to {save_folder}")
+    import pdb
+
+    pdb.set_trace()
     torch.save(
         best_model.state_dict(),
-        self.save_folder / f"model_e{best_model_epoch}.pt",
+        save_folder + f"model_e{best_model_epoch}.pt",
     )
+    wandb.use_artifact(save_folder + f"model_e{best_model_epoch}.pt", type="model")
+
+    wandb.finish()
+    gc.collect()
+    return best_model
 
 
 def define_wandb_metrcis():
@@ -186,70 +248,71 @@ def define_wandb_metrcis():
     wandb.define_metric("test/avg_bio", summary="max")
 
 
-def random_mask_value_weighted(
-    values: Union[torch.Tensor, np.ndarray],
-    mask_ratio: float = 0.15,
-    mask_value: int = -1,
-    do_not_pad_index: Union[torch.Tensor, np.ndarray] = np.array([]),
-    pad_value: int = 0,
-) -> torch.Tensor:
-    """
-    Randomly mask a batch of data.
-
-    Args:
-        values (array-like):
-            A batch of tokenized data, with shape (batch_size, n_features).
-        mask_ratio (float): The ratio of genes to mask, default to 0.15.
-        mask_value (int): The value to mask with, default to -1.
-        pad_value (int): The value of padding in the values, will be kept unchanged.
-
-    Returns:
-        torch.Tensor: A tensor of masked data.
-    """
-    if isinstance(values, torch.Tensor):
-        # it is crutial to clone the tensor, otherwise it changes the original tensor
-        values = values.clone().detach().numpy()
-    else:
-        values = values.copy()
-
-    for i in range(len(values)):
-        row = values[i]
-        non_padding_idx = np.nonzero(row - pad_value)[0]
-        non_padding_idx = np.setdiff1d(non_padding_idx, do_not_pad_index)
-        n_mask = int(len(non_padding_idx) * mask_ratio)
-        mask_idx = np.random.choice(non_padding_idx, n_mask, replace=False)
-        row[mask_idx] = mask_value
-    return torch.from_numpy(values).float()
-
-
 config = {
-    "GEPC": True,  # Gene expression modelling for cell objective
-    "ecs_thres": 0.8,  # Elastic cell similarity objective, 0.0 to 1.0, 0.0 to disable
-    "dab_weight": 1.0,  # DAR objective weight for batch correction
+    "GEPC": False,  # Gene expression modelling for cell objective
+    "MVC": True,
+    "GEP": True,
     "mask_ratio": 0.4,  # Default mask ratio
-    "epochs": 15,  # Default number of epochs for fine-tuning
-    "n_bins": 51,  # Default number of bins for value binning in data pre-processing
+    "DSBN": True,  # Default setting
+    "ECS": False,
+    "ecs_thres": 0.8,  # Elastic cell similarity objective, 0.0 to 1.0, 0.0 to disable
+    "CLS": True,
+    "USE_CLS": False,
+    "USE_GENERATIVE_TRAINING": True,
+    "DAR": False,
+    "dab_weight": 1.0,  # DAR objective weight for batch correction
+    "USE_CCE": False,
+    "explicit_zero_prob": False,
+    #
+    "epochs": 6,  # Default number of epochs for fine-tuning
     "lr": 1e-4,  # Default learning rate for fine-tuning
-    "batch_size": 64,  # Default batch size for fine-tuning
-    "layer_size": 128,
-    "nhead": 8,  # if load model, batch_size, layer_size, nlayers, nhead will be ignored
-    "dropout": 0.2,  # Default dropout rate during model fine-tuning
     "schedule_ratio": 0.9,  # Default rate for learning rate decay
     "save_eval_interval": 5,  # Default model evaluation interval
     "log_interval": 100,  # Default log interval
     "pre_norm": False,  # Default setting
-    "dsbn": True,  # Default setting
     "amp": True,  # # Default setting: Automatic Mixed Precision
+    "dropout": 0.2,  # Default dropout rate during model fine-tuning
+    "batch_size": 6,
+    "eval_batch_size": 8,
+    "log_interval": 9000,
+    "save_interval": 27000,
+    #
     "scheduler_interval": 100,
     "scheduler_factor": 0.99,
     "warmup_ratio_or_step": 10000.0,
-    "no_cls": True,
+    #
     "no_cce": True,
-    "fp16": True,
+    #
     "fast_transformer": True,
+    "n_layers_cls": 3,
+    "fp16": True,
     "nlayers": 12,
     "embsize": 512,
     "d_hid": 512,
-    "n_layers_cls": 3,
+    "nhead": 8,  # if load model, batch_size, layer_size, nlayers, nhead will be ignored
+    "layer_size": 128,
+    #
     "max_seq_len": 1200,
+    "n_hvg": 2000,
+    "n_bins": 51,  # Default number of bins for value binning in data pre-processing
+    "mask_value": -1,
+    "pad_value": -2,
+    "pad_token": "<pad>",
+    "input_style": "binned",
+    #
+    "valid_size_or_ratio": 0.003,
+    "dist_backend": "nccl",
+    "grad_accu_steps": 1,
+    "input_emb_style": "continuous",
+    "training_tasks": "both",
+    "trunc_by_sample": True,
+    "rank": 0,
+    #
+    "world_size": 16,
+    "distributed": True,
+    "local_rank": 0,
+    "gpu": 0,
+    "task": "annotation",
+    "use_batch_labels": True,
+    "use_mod": False,
 }
