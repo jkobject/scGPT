@@ -226,9 +226,7 @@ def fine_tune(
             logger.info(f"Best model with score {best_val_loss:5.4f}")
         scheduler.step()
     logger.info(f"Saving model to {save_folder}")
-    import pdb
 
-    pdb.set_trace()
     torch.save(
         best_model.state_dict(),
         save_folder + f"model_e{best_model_epoch}.pt",
@@ -246,6 +244,7 @@ def define_wandb_metrcis():
     wandb.define_metric("valid/dab", summary="min", step_metric="epoch")
     wandb.define_metric("valid/sum_mse_dab", summary="min", step_metric="epoch")
     wandb.define_metric("test/avg_bio", summary="max")
+
 
 
 config = {
