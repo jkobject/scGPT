@@ -231,21 +231,7 @@ class GeneEmbedding(object):
         df = pd.DataFrame.from_dict({"Cluster Name": clusters, "Top Genes": symbols})
         return df
 
-    @staticmethod
-    def read_vector(vec):
-        lines = open(vec, "r").read().splitlines()
-        dims = lines.pop(0)
-        vecs = dict()
-        for line in lines:
-            try:
-                line = line.split()
-                gene = line.pop(0)
-                vecs[gene] = list(map(float, line))
-            except Exception as e:
-                continue
-        return vecs, dims
-
-    def get_similar_genes(self, vector):
+    def get_similar_to(self, vector):
         distances = dict()
         targets = list(self.embeddings.keys())
         for target in targets:
@@ -295,3 +281,17 @@ class GeneEmbedding(object):
                 meanv.append(str((x + y) / 2))
             output.write("{} {}\n".format(gene, " ".join(meanv)))
         output.close()
+
+    @staticmethod
+    def read_vector(vec):
+        lines = open(vec, "r").read().splitlines()
+        dims = lines.pop(0)
+        vecs = dict()
+        for line in lines:
+            try:
+                line = line.split()
+                gene = line.pop(0)
+                vecs[gene] = list(map(float, line))
+            except Exception as e:
+                continue
+        return vecs, dims
