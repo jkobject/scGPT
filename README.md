@@ -4,10 +4,16 @@ This is the official codebase for **scGPT: Towards Building a Foundation Model f
 
 [![Preprint](https://img.shields.io/badge/preprint-available-brightgreen)](https://www.biorxiv.org/content/10.1101/2023.04.30.538439) &nbsp;
 [![Documentation](https://img.shields.io/badge/docs-available-brightgreen)](https://scgpt.readthedocs.io/en/latest/) &nbsp;
-[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/username/repo/blob/main/LICENSE) &nbsp;
-[![PyPI version](https://badge.fury.io/py/scgpt.svg)](https://badge.fury.io/py/scgpt)
+[![PyPI version](https://badge.fury.io/py/scgpt.svg)](https://badge.fury.io/py/scgpt) &nbsp;
+[![Downloads](https://pepy.tech/badge/scgpt)](https://pepy.tech/project/scgpt) &nbsp;
+![Webapp](https://img.shields.io/website?url=https%3A%2F%2Fscgpthub.org&up_color=chartreuse%20&logo=gotomeeting&logoColor=%23FFB3FF&label=WebApp&labelColor=%2300CBFF) &nbsp;
+[![License](https://img.shields.io/badge/license-MIT-blue)](https://github.com/username/repo/blob/main/LICENSE)
 
 **!UPDATE**: We have released several new pretrained scGPT checkpoints. Please see the [Pretrained scGPT checkpoints](#pretrained-scGPT-checkpoints) section for more details.
+
+**[2024.02.26]** We have provided a priliminary support for running the pretraining workflow with HuggingFace at the [integrate-huggingface-model](https://github.com/bowang-lab/scGPT/tree/integrate-huggingface-model) branch. We will conduct further testing and merge it to the main branch soon.
+
+**[2023.12.31]** New tutorials about zero-shot applications are now available! Please see find them in the [tutorials/zero-shot](tutorials/zero-shot) directory. We also provide a new continual pretrained model checkpoint for cell embedding related tasks. Please see the [notebook](tutorials/zero-shot/Tutorial_ZeroShot_Integration_Continual_Pretraining.ipynb) for more details.
 
 **[2023.11.07]** As requested by many, now we have made flash-attention an optional dependency. The pretrained weights can be loaded on pytorch CPU, GPU, and flash-attn backends using the same [load_pretrained](https://github.com/bowang-lab/scGPT/blob/f6097112fe5175cd4e221890ed2e2b1815f54010/scgpt/utils/util.py#L304) function, `load_pretrained(target_model, torch.load("path_to_ckpt.pt"))`. An example usage is also [here](https://github.com/bowang-lab/scGPT/blob/f6097112fe5175cd4e221890ed2e2b1815f54010/scgpt/tasks/cell_emb.py#L258).
 
@@ -17,7 +23,7 @@ This is the official codebase for **scGPT: Towards Building a Foundation Model f
 
 scGPT is now available at the following online apps as well, so you can get started simply with your browser!
 
-- Run the [cell annotation app](https://app.superbio.ai/apps/274?id=64d205cb980ff714de831ee0) and the [GRN inference app](https://app.superbio.ai/apps/270?id=64b804fb823bc93b64c10a76) with cloud gpus. Thanks to the [Superbio.ai](https://app.superbio.ai/) team for helping create and host the interactive tools.
+- Run the [reference mapping app](https://app.superbio.ai/apps/299?id=6548f339a9ed6f6e5560b07d), [cell annotation app](https://app.superbio.ai/apps/274?id=64d205cb980ff714de831ee0) and the [GRN inference app](https://app.superbio.ai/apps/270?id=64b804fb823bc93b64c10a76) with cloud gpus. Thanks to the [Superbio.ai](https://app.superbio.ai/) team for helping create and host the interactive tools.
 
 ## Installation
 
@@ -26,7 +32,6 @@ scGPT works with Python >= 3.7.13 and R >=3.6.1. Please make sure you have the c
 scGPT is available on PyPI. To install scGPT, run the following command:
 
 ```bash
-pip install torch==1.13.0
 pip install scgpt "flash-attn<1.0.5"  # optional, recommended
 # As of 2023.09, pip install may not run with new versions of the google orbax package, if you encounter related issues, please use the following command instead:
 # pip install scgpt "flash-attn<1.0.5" "orbax<0.1.8"
@@ -55,6 +60,7 @@ Here is the list of pretrained models. Please find the links for downloading the
 | Model name                | Description                                             | Download                                                                                     |
 | :------------------------ | :------------------------------------------------------ | :------------------------------------------------------------------------------------------- |
 | whole-human (recommended) | Pretrained on 33 million normal human cells.            | [link](https://drive.google.com/drive/folders/1oWh_-ZRdhtoGQ2Fw24HP41FgLoomVo-y?usp=sharing) |
+| continual pretrained      | For zero-shot cell embedding related tasks.             | [link](https://drive.google.com/drive/folders/1_GROJTzXiAV8HB4imruOTk6PEGuNOcgB?usp=sharing) |
 | brain                     | Pretrained on 13.2 million brain cells.                 | [link](https://drive.google.com/drive/folders/1vf1ijfQSk7rGdDGpBntR5bi5g6gNt-Gx?usp=sharing) |
 | blood                     | Pretrained on 10.3 million blood and bone marrow cells. | [link](https://drive.google.com/drive/folders/1kkug5C7NjvXIwQGGaGoqXTk_Lb_pDrBU?usp=sharing) |
 | heart                     | Pretrained on 1.8 million heart cells                   | [link](https://drive.google.com/drive/folders/1GcgXrd7apn6y4Ze_iSCncskX3UsWPY2r?usp=sharing) |
@@ -74,7 +80,7 @@ Please see our example code in [examples/finetune_integration.py](examples/finet
 - [ ] Finetuning examples for multi-omics integration, cell type annotation, perturbation prediction, cell generation
 - [x] Example code for Gene Regulatory Network analysis
 - [x] Documentation website with readthedocs
-- [ ] Bump up to pytorch 2.0
+- [x] Bump up to pytorch 2.0
 - [x] New pretraining on larger datasets
 - [x] Reference mapping example
 - [ ] Publish to huggingface model hub

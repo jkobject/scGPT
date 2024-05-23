@@ -79,7 +79,7 @@ def get_batch_cell_embeddings(
             genes = np.insert(genes, 0, vocab["<cls>"])
             values = np.insert(values, 0, model_configs["pad_value"])
             genes = torch.from_numpy(genes).long()
-            values = torch.from_numpy(values)
+            values = torch.from_numpy(values).float()
             output = {
                 "id": idx,
                 "genes": genes,
@@ -255,7 +255,7 @@ def embed_data(
         fast_transformer_backend="flash",
         pre_norm=False,
     )
-    load_pretrained(model, torch.load(model_file), verbose=False)
+    load_pretrained(model, torch.load(model_file, map_location=device), verbose=False)
     model.to(device)
     model.eval()
 
