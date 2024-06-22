@@ -455,7 +455,7 @@ class TransformerModel(nn.Module):
         batch_labels: Optional[Tensor] = None,
         output_to_cpu: bool = True,
         time_step: Optional[int] = None,
-        return_np: bool = False,
+        return_np: bool = True,
     ) -> Tensor:
         """
         Args:
@@ -500,7 +500,7 @@ class TransformerModel(nn.Module):
             if return_np:
                 output = output.numpy()
             if time_step is not None:
-                output = output[:, time_step, :]
+                output = np.mean(output[:, time_step:, :])
             outputs[i : i + batch_size] = output
 
         return outputs

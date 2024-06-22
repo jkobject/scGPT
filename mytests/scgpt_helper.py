@@ -18,11 +18,211 @@ from scipy.sparse import issparse
 from sklearn.model_selection import train_test_split
 import copy
 import torch
-from torch import nn
 import gc
+import json
+
+from tqdm import tqdm
+from torch.nn import functional as F
+
+from scgpt.tokenizer.gene_tokenizer import GeneVocab
+from einops import rearrange
+from torch.nn.functional import softmax
+from torch.nn import functional as F
+from torch import nn
+import torch
+
+from scgpt.model import TransformerModel
+
+from torchtext.vocab import Vocab
+from torchtext._torchtext import (
+    Vocab as VocabPybind,
+)
+from scgpt.preprocess import Preprocessor
+
+from grnndata import GRNAnnData
 
 
-def prepare_dataset(
+def prepare_model(model_dir="../save/scGPT_human", special_tokens = ["<pad>", "<cls>", "<eoc>"], n_bins = 51, pad_value = -2):
+    # Specify model path; here we load the scGPT blood model fine-tuned on adamson
+    model_dir = Path(model_dir)
+    model_config_file = model_dir / "args.json"
+    model_file = model_dir / "best_model.pt"
+    vocab_file = model_dir / "vocab.json"
+
+    vocab = GeneVocab.from_file(vocab_file)
+    for s in special_tokens:
+        if s not in vocab:
+            vocab.append_token(s)
+
+    # Retrieve model parameters from config files
+    with open(model_config_file, "r") as f:
+        model_configs = json.load(f)
+    print(
+        f"Resume model from {model_file}, the model args will override the "
+        f"config {model_config_file}."
+    )
+    embsize = model_configs["embsize"]
+    nhead = model_configs["nheads"]
+    d_hid = model_configs["d_hid"]
+    nlayers = model_configs["nlayers"]
+
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+
+    ntokens = len(vocab)  # size of vocabulary
+    model = TransformerModel(
+        ntokens,
+        embsize,
+        nhead,
+        d_hid,
+        nlayers,
+        vocab=vocab,
+        pad_value=pad_value,
+        n_input_bins=n_bins,
+        use_fast_transformer=True,
+    )
+
+    try:
+        model.load_state_dict(torch.load(model_file))
+        #print(f"Loading all model params from {model_file}")
+    except:
+        # only load params that are in the model and match the size
+        model_dict = model.state_dict()
+        pretrained_dict = torch.load(model_file)
+        pretrained_dict = {
+            k: v
+            for k, v in pretrained_dict.items()
+            if k in model_dict and v.shape == model_dict[k].shape
+        }
+        for k, v in pretrained_dict.items():
+            #print(f"Loading params {k} with shape {v.shape}")
+            model_dict.update(pretrained_dict)
+            model.load_state_dict(model_dict)
+
+    model.to(device)
+    return model, vocab
+
+
+def prepare_dataset(subadata, vocab, data_is_raw=True, pad_token = "<pad>", n_bins = 51, pad_value = -2):
+    subadata.var["id_in_vocab"] = [
+        1 if gene in vocab else -1 for gene in subadata.var.index
+    ]
+    subadata = subadata[:, subadata.var["id_in_vocab"] >= 0]
+
+    preprocessor = Preprocessor(
+        use_key="X",  # the key in adata.layers to use as raw data
+        filter_gene_by_counts=3,  # step 1
+        filter_cell_by_counts=False,  # step 2
+        normalize_total=1e4,  # 3. whether to normalize the raw data and to what sum
+        result_normed_key="X_normed",  # the key in adata.layers to store the normalized data
+        log1p=data_is_raw,  # 4. whether to log1p the normalized data
+        result_log1p_key="X_log1p",
+        subset_hvg=False,  # 5. whether to subset the raw data to highly variable genes
+        hvg_flavor="seurat_v3" if data_is_raw else "cell_ranger",
+        binning=n_bins,  # 6. whether to bin the raw data and to what number of bins
+        result_binned_key="X_binned",  # the key in adata.layers to store the binned data
+    )
+    preprocessor(subadata, batch_key="str_batch")
+
+    input_layer_key = "X_binned"
+    all_counts = (
+        subadata.layers[input_layer_key].A
+        if issparse(subadata.layers[input_layer_key])
+        else subadata.layers[input_layer_key]
+    )
+    genes = subadata.var.index.tolist()
+    gene_ids = np.array(vocab(genes), dtype=int)
+    tokenized_all = tokenize_and_pad_batch(
+        all_counts,
+        gene_ids,
+        max_len=len(genes) + 1,
+        vocab=vocab,
+        pad_token=pad_token,
+        pad_value=pad_value,
+        append_cls=True,  # append <cls> token at the beginning
+        include_zero_gene=True,
+    )
+
+    all_gene_ids, all_values = tokenized_all["genes"], tokenized_all["values"]
+    src_key_padding_mask = all_gene_ids.eq(vocab[pad_token])
+    return all_gene_ids, all_values, src_key_padding_mask, subadata
+
+
+def generate_embedding(model, vocab, adata, batch_size = 10):
+    torch.cuda.empty_cache()
+    all_gene_ids, all_values, src_key_padding_mask, adata = prepare_dataset(adata, vocab)
+    model.eval()
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
+        cell_embeddings = model.encode_batch(all_gene_ids, all_values, src_key_padding_mask, batch_size=batch_size, time_step=0)
+        cell_embeddings = cell_embeddings / np.linalg.norm(
+            cell_embeddings, axis=1, keepdims=True
+        )
+    adata.obsm['scgpt_emb'] = cell_embeddings
+    return adata
+
+
+def generate_grn(model, vocab, adata, batch_size = 10, num_attn_layers = 11):
+    torch.cuda.empty_cache()
+    dict_sum_condition = {}
+    all_gene_ids, all_values, src_key_padding_mask, subadata = prepare_dataset(adata, vocab)
+    # Use this argument to specify which layer to extract the attention weights from
+    # Default to 11, extraction from the last (12th) layer. Note that index starts from 0
+    model.eval()
+    with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
+        M = all_gene_ids.size(1)
+        N = all_gene_ids.size(0)
+        device = next(model.parameters()).device
+        for i in tqdm(range(0, N, batch_size)):
+            batch_size = all_gene_ids[i : i + batch_size].size(0)
+            outputs = np.zeros((batch_size, M, M), dtype=np.float32)
+            # Replicate the operations in model forward pass
+            src_embs = model.encoder(
+                torch.tensor(all_gene_ids[i : i + batch_size], dtype=torch.long).to(device)
+            )
+            val_embs = model.value_encoder(
+                torch.tensor(all_values[i : i + batch_size], dtype=torch.float).to(device)
+            )
+            total_embs = src_embs + val_embs
+            # total_embs = model.layer(total_embs.permute(0, 2, 1)).permute(0, 2, 1)
+            # Send total_embs to attention layers for attention operations
+            # Retrieve the output from second to last layer
+            for layer in model.transformer_encoder.layers[:num_attn_layers]:
+                total_embs = layer(
+                    total_embs,
+                    src_key_padding_mask=src_key_padding_mask[i : i + batch_size].to(
+                        device
+                    ),
+                )
+            # Send total_embs to the last layer in flash-attn
+            # https://github.com/HazyResearch/flash-attention/blob/1b18f1b7a133c20904c096b8b222a0916e1b3d37/flash_attn/flash_attention.py#L90
+            qkv = F.linear(total_embs, model.transformer_encoder.layers[num_attn_layers].self_attn.in_proj_weight, bias=model.transformer_encoder.layers[num_attn_layers].self_attn.in_proj_bias)
+            #qkv = h.reshape(total_embs.shape[0], total_embs.shape[1], nhead, 3 * d_hid//nhead)
+            #qkv = qkv.permute(0, 2, 1, 3)  # [Batch, Head, SeqLen, Dims]
+            # Retrieve q, k, and v from flast-attn wrapper
+            qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, h=8)
+            q = qkv[:, :, 0, :, :]
+            k = qkv[:, :, 1, :, :]
+            v = qkv[:, :, 2, :, :]
+            # https://towardsdatascience.com/illustrated-self-attention-2d627e33b20a
+            # q = [batch, gene, n_heads, n_hid]
+            # k = [batch, gene, n_heads, n_hid]
+            # attn_scores = [batch, n_heads, gene, gene]
+            attn_scores = q.permute(0, 2, 1, 3) @ k.permute(0, 2, 3, 1)
+            # apply softmax to get attention weights
+            attn_scores = softmax(attn_scores, dim=-1)
+
+            if i == 0:
+                sm_attn_scores = attn_scores.sum(0).mean(0).detach().cpu().numpy()
+            else:
+                # take the sum
+                sm_attn_scores += attn_scores.sum(0).mean(0).detach().cpu().numpy()
+
+    sm_attn_scores = sm_attn_scores / (i*batch_size)
+    return GRNAnnData(subadata, grn=sm_attn_scores[1:,1:])
+
+
+### prev#####
+
+def _prepare_dataset(
     dataset,
     vocab,
     batch_size,
