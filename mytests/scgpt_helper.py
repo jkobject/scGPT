@@ -215,8 +215,9 @@ def generate_grn(model, vocab, adata, batch_size = 10, num_attn_layers = 11):
             else:
                 # take the sum
                 sm_attn_scores += attn_scores.sum(0).mean(0).detach().cpu().numpy()
-
-    sm_attn_scores = sm_attn_scores / (i*batch_size)
+        import pdb
+        pdb.set_trace()
+    sm_attn_scores = sm_attn_scores / N
     return GRNAnnData(subadata, grn=sm_attn_scores[1:,1:])
 
 
