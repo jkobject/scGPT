@@ -104,7 +104,7 @@ def prepare_model(model_dir="../save/scGPT_human", special_tokens = ["<pad>", "<
 
 def prepare_dataset(subadata, vocab, data_is_raw=True, pad_token = "<pad>", n_bins = 51, pad_value = -2):
     subadata.var["id_in_vocab"] = [
-        1 if gene in vocab else -1 for gene in subadata.var.index
+        1 if gene in vocab else -1 for gene in subadata.var.index.astype(str)
     ]
     subadata = subadata[:, subadata.var["id_in_vocab"] >= 0]
 
