@@ -106,6 +106,8 @@ def prepare_dataset(subadata, vocab, data_is_raw=True, pad_token = "<pad>", n_bi
     subadata.var["id_in_vocab"] = [
         1 if gene in vocab else -1 for gene in subadata.var.index.astype(str)
     ]
+    import pdb
+    pdb.set_trace()
     subadata = subadata[:, subadata.var["id_in_vocab"] >= 0]
 
     preprocessor = Preprocessor(
