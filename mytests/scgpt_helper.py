@@ -42,7 +42,12 @@ from scgpt.preprocess import Preprocessor
 from grnndata import GRNAnnData
 
 
-def prepare_model(model_dir="../save/scGPT_human", special_tokens = ["<pad>", "<cls>", "<eoc>"], n_bins = 51, pad_value = -2):
+def prepare_model(
+    model_dir="../save/scGPT_human",
+    special_tokens=["<pad>", "<cls>", "<eoc>"],
+    n_bins=51,
+    pad_value=-2,
+):
     # Specify model path; here we load the scGPT blood model fine-tuned on adamson
     model_dir = Path(model_dir)
     model_config_file = model_dir / "args.json"
@@ -83,7 +88,7 @@ def prepare_model(model_dir="../save/scGPT_human", special_tokens = ["<pad>", "<
 
     try:
         model.load_state_dict(torch.load(model_file))
-        #print(f"Loading all model params from {model_file}")
+        # print(f"Loading all model params from {model_file}")
     except:
         # only load params that are in the model and match the size
         model_dict = model.state_dict()
@@ -94,7 +99,7 @@ def prepare_model(model_dir="../save/scGPT_human", special_tokens = ["<pad>", "<
             if k in model_dict and v.shape == model_dict[k].shape
         }
         for k, v in pretrained_dict.items():
-            #print(f"Loading params {k} with shape {v.shape}")
+            # print(f"Loading params {k} with shape {v.shape}")
             model_dict.update(pretrained_dict)
             model.load_state_dict(model_dict)
 
@@ -102,12 +107,12 @@ def prepare_model(model_dir="../save/scGPT_human", special_tokens = ["<pad>", "<
     return model, vocab
 
 
-def prepare_dataset(subadata, vocab, data_is_raw=True, pad_token = "<pad>", n_bins = 51, pad_value = -2):
+def prepare_dataset(
+    subadata, vocab, data_is_raw=True, pad_token="<pad>", n_bins=51, pad_value=-2
+):
     subadata.var["id_in_vocab"] = [
         1 if gene in vocab else -1 for gene in subadata.var.index.astype(str)
     ]
-    import pdb
-    pdb.set_trace()
     subadata = subadata[:, subadata.var["id_in_vocab"] >= 0]
 
     preprocessor = Preprocessor(
@@ -149,23 +154,33 @@ def prepare_dataset(subadata, vocab, data_is_raw=True, pad_token = "<pad>", n_bi
     return all_gene_ids, all_values, src_key_padding_mask, subadata
 
 
-def generate_embedding(model, vocab, adata, batch_size = 10):
+def generate_embedding(model, vocab, adata, batch_size=10):
     torch.cuda.empty_cache()
-    all_gene_ids, all_values, src_key_padding_mask, adata = prepare_dataset(adata, vocab)
+    all_gene_ids, all_values, src_key_padding_mask, adata = prepare_dataset(
+        adata, vocab
+    )
     model.eval()
     with torch.no_grad(), torch.cuda.amp.autocast(enabled=True):
-        cell_embeddings = model.encode_batch(all_gene_ids, all_values, src_key_padding_mask, batch_size=batch_size, time_step=0)
+        cell_embeddings = model.encode_batch(
+            all_gene_ids,
+            all_values,
+            src_key_padding_mask,
+            batch_size=batch_size,
+            time_step=0,
+        )
         cell_embeddings = cell_embeddings / np.linalg.norm(
             cell_embeddings, axis=1, keepdims=True
         )
-    adata.obsm['scgpt_emb'] = cell_embeddings
+    adata.obsm["scgpt_emb"] = cell_embeddings
     return adata
 
 
-def generate_grn(model, vocab, adata, batch_size = 10, num_attn_layers = 11):
+def generate_grn(model, vocab, adata, batch_size=10, num_attn_layers=11):
     torch.cuda.empty_cache()
     dict_sum_condition = {}
-    all_gene_ids, all_values, src_key_padding_mask, subadata = prepare_dataset(adata, vocab)
+    all_gene_ids, all_values, src_key_padding_mask, subadata = prepare_dataset(
+        adata, vocab
+    )
     # Use this argument to specify which layer to extract the attention weights from
     # Default to 11, extraction from the last (12th) layer. Note that index starts from 0
     model.eval()
@@ -178,10 +193,14 @@ def generate_grn(model, vocab, adata, batch_size = 10, num_attn_layers = 11):
             outputs = np.zeros((batch_size, M, M), dtype=np.float32)
             # Replicate the operations in model forward pass
             src_embs = model.encoder(
-                torch.tensor(all_gene_ids[i : i + batch_size], dtype=torch.long).to(device)
+                torch.tensor(all_gene_ids[i : i + batch_size], dtype=torch.long).to(
+                    device
+                )
             )
             val_embs = model.value_encoder(
-                torch.tensor(all_values[i : i + batch_size], dtype=torch.float).to(device)
+                torch.tensor(all_values[i : i + batch_size], dtype=torch.float).to(
+                    device
+                )
             )
             total_embs = src_embs + val_embs
             # total_embs = model.layer(total_embs.permute(0, 2, 1)).permute(0, 2, 1)
@@ -196,9 +215,17 @@ def generate_grn(model, vocab, adata, batch_size = 10, num_attn_layers = 11):
                 )
             # Send total_embs to the last layer in flash-attn
             # https://github.com/HazyResearch/flash-attention/blob/1b18f1b7a133c20904c096b8b222a0916e1b3d37/flash_attn/flash_attention.py#L90
-            qkv = F.linear(total_embs, model.transformer_encoder.layers[num_attn_layers].self_attn.in_proj_weight, bias=model.transformer_encoder.layers[num_attn_layers].self_attn.in_proj_bias)
-            #qkv = h.reshape(total_embs.shape[0], total_embs.shape[1], nhead, 3 * d_hid//nhead)
-            #qkv = qkv.permute(0, 2, 1, 3)  # [Batch, Head, SeqLen, Dims]
+            qkv = F.linear(
+                total_embs,
+                model.transformer_encoder.layers[
+                    num_attn_layers
+                ].self_attn.in_proj_weight,
+                bias=model.transformer_encoder.layers[
+                    num_attn_layers
+                ].self_attn.in_proj_bias,
+            )
+            # qkv = h.reshape(total_embs.shape[0], total_embs.shape[1], nhead, 3 * d_hid//nhead)
+            # qkv = qkv.permute(0, 2, 1, 3)  # [Batch, Head, SeqLen, Dims]
             # Retrieve q, k, and v from flast-attn wrapper
             qkv = rearrange(qkv, "b s (three h d) -> b s three h d", three=3, h=8)
             q = qkv[:, :, 0, :, :]
@@ -218,10 +245,11 @@ def generate_grn(model, vocab, adata, batch_size = 10, num_attn_layers = 11):
                 # take the sum
                 sm_attn_scores += attn_scores.sum(0).mean(0).detach().cpu().numpy()
     sm_attn_scores = sm_attn_scores / N
-    return GRNAnnData(subadata, grn=sm_attn_scores[1:,1:])
+    return GRNAnnData(subadata, grn=sm_attn_scores[1:, 1:])
 
 
 ### prev#####
+
 
 def _prepare_dataset(
     dataset,
@@ -445,7 +473,6 @@ def define_wandb_metrcis():
     wandb.define_metric("valid/dab", summary="min", step_metric="epoch")
     wandb.define_metric("valid/sum_mse_dab", summary="min", step_metric="epoch")
     wandb.define_metric("test/avg_bio", summary="max")
-
 
 
 config = {
